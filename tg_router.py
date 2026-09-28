@@ -801,6 +801,11 @@ async def process_execute_update(callback_query: types.CallbackQuery, state: FSM
         def _run_git_update():
             import subprocess
             import py_compile
+            import os
+            
+            # 항상 현재 tg_router.py가 있는 폴더(안쪽 폴더)를 기준점으로 삼음
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            os.chdir(base_dir)
             
             def run_cmd(cmd):
                 proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
