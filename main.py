@@ -25,11 +25,13 @@
 # NEW: 수동 진입 상태에서 자동매매 동시 진입 충돌을 완벽 차단하기 위한 3단계 배타적 절대 락온(Global Shared Holdings + Probing) 결속
 # MODIFIED: 수동 개입(잔고 존재, buy_order_id 부재) 식별 시 is_rearm = False 강제 주입으로 세션 락(is_session_done) 및 평단가 장부 기록 정상화
 # MODIFIED: 잔고 보유 중(수동/자동) 추가 진입 원천 차단을 위한 매수 요격 조건식(holdings_qty == 0) 하드 락온
-# NEW: 초과 Case 58 - 매크로 위험(스퀴즈 및 진폭 한계) 감지 전용 백그라운드 모니터(macro_risk_monitor) 결속 및 yfinance NQ=F 연동
-# MODIFIED: 초과 Case 58 - 매크로 위험 감지 시 강제 퇴근 사유 명문화 및 비대칭 수동 진입 권고 타전망 결속 (숏 금지 로직 최저가 도달 시 무조건 격발)
-# MODIFIED: 매크로 위험(스퀴즈 및 진폭 한계) 롱 차단 기준을 1.5%에서 절대헌법 1.0%로 보수적 하향 락온 적용
+# REMOVED: 매크로 위험 감지망(스퀴즈 및 진폭 한계) 100% 소각 및 순수 aVWAP 추세 추종 모드로 복귀 락온
 # NEW: 무인 자동 깃허브 업데이트 폴링망(auto_update_loop) 백그라운드 결속 및 시스템 대기 시간대(17:00~03:59 EST) 하드 락온
 # NEW: 토스증권 API 통신망 일시 붕괴 복구 시 1회성 정상화 타전망(Silent Recovery 알림) 결속
+# NEW: 돌파 매수 타전 시 실시간 NQ=F 데이터(현재가, 총 진폭, 반등률) 비동기 수집 및 메시지 융합(Fallback 방어망 포함) 락온
+# MODIFIED: NQ=F yfinance 데이터 period="1d" 자정 증발 한계 극복을 위한 5d 스코프 확장 및 45분 갭 기반 논리 세션 시프트 락온
+# NEW: 초과 Case 64 - 조건주문 익절 덫 1.0% 연산 시 순수 체결가 대신 토스증권 장부상 팩트 매수단가(averagePurchasePrice) 최우선 락온 결속
+# NEW: 초과 Case 65 - 매수 요격 전 USD Buying Power 원자적 프로빙 및 예산 동적 안전화(0.5% 버퍼) 락온 결속 (달러 부족 422 에러 원천 봉쇄)
 
 import sys
 import os
@@ -197,70 +199,6 @@ async def auto_update_loop(bot: Bot, chat_id: int):
             print(f"🚨 [무인 업데이트망 붕괴 방어] {e}", flush=True)
             
         await asyncio.sleep(3600.0)
-
-async def macro_risk_monitor(bot: Bot, chat_id: int):
-    while True:
-        try:
-            now_est = datetime.now(ZoneInfo('America/New_York'))
-            if now_est.hour >= 19 or now_est.hour < 4:
-                await asyncio.sleep(60.0)
-                continue
-
-            state_l = await AssassinLedger.get_state("SOXL")
-            state_s = await AssassinLedger.get_state("SOXS")
-            
-            if state_l[3] and state_s[3]: 
-                await asyncio.sleep(60.0)
-                continue
-
-            def _get_nq():
-                tkr = yf.Ticker("NQ=F")
-                df = tkr.history(period="1d", interval="1m")
-                if df.empty: return 0.0, 0.0, 0.0
-                return float(df['High'].max()), float(df['Low'].min()), float(df['Close'].iloc[-1])
-
-            try:
-                h, l, c = await asyncio.wait_for(asyncio.to_thread(_get_nq), timeout=10.0)
-            except Exception as e:
-                print(f"🚨 [yfinance NQ=F 통신 방어] {e}", flush=True)
-                h, l, c = 0.0, 0.0, 0.0
-
-            if h > 0 and l > 0 and c > 0 and h > l:
-                daily_amp = (h - l) / l * 100.0
-                
-                # MODIFIED: 1.5 -> 1.0 절대헌법에 따른 잔여 체력 임계값 하향 락온
-                long_exhausted = ((c * 1.002 - l) / l * 100.0) > 1.0
-                short_exhausted = (daily_amp > 0.3) and (((c - l) / l * 100.0) <= 0.1)
-
-                if long_exhausted or short_exhausted:
-                    await AssassinLedger.save_state("SOXL", is_session_done=True, entry_session="MACRO_BLOCKED")
-                    await AssassinLedger.save_state("SOXS", is_session_done=True, entry_session="MACRO_BLOCKED")
-                    
-                    if long_exhausted and short_exhausted:
-                        reason_msg = "▫️ 사유: NQ=F 상/하방 진폭 체력이 모두 한계치에 도달함 (극심한 방향성 상실)\n▫️ 권고: 방향성 확립 시까지 <b>전면 관망</b>을 유지하십시오."
-                    elif long_exhausted:
-                        # MODIFIED: 1.5% -> 1.0% 타전 팩트 동기화 락온
-                        reason_msg = "▫️ 사유: NQ=F 최고가 부근 도달 및 롱(SOXL) 1% 익절을 위한 추가 상승 체력(1.0% 한계) 100% 고갈\n▫️ 권고: <b>숏(SOXS)에 수동으로 진입하세요.</b>"
-                    elif short_exhausted:
-                        reason_msg = "▫️ 사유: NQ=F 현재 지수가 당일 최저가(저점) 부근에 도달함 (대세 상승 반전 위험)\n▫️ 권고: <b>롱(SOXL)에 수동으로 진입 하세요.</b>"
-
-                    try:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text="🚨 <b>[매크로 위험 감지] 금일 암살자 자동 진입 전면 차단 및 강제 퇴근 처리</b>\n"
-                                 f"{reason_msg}\n"
-                                 f"▫️ 현재 지수: {c:.2f} (고가: {h:.2f} / 저가: {l:.2f})\n"
-                                 "▫️ 조치: SOXL/SOXS 양방향 신규 진입 권한 100% 영구 소각",
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
-                    print(f"🛑 [매크로 위험 감지] NQ=F 한계 도달. 롱 차단 조건: {long_exhausted}, 숏 차단 조건: {short_exhausted}. 양방향 퇴근 락온 완료.", flush=True)
-
-        except Exception as e:
-            print(f"🚨 [매크로 모니터망 붕괴 방어] {e}", flush=True)
-
-        await asyncio.sleep(60.0)
 
 async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: str):
     global last_holiday_notified_date
@@ -619,7 +557,7 @@ async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: s
                         try:
                             await client.cancel_conditional_order(cond_order_id)
                             await AssassinLedger.save_state(symbol, cond_order_id="", target_sell_price=0.0)
-                            print(f"🛑 [수동 오버나이트 {symbol}] 가동 OFF 감지. 익절 조건주문({cond_order_id}) 파기 완료.", flush=True)
+                            print(f"🛑 [수동 오버나이트 {symbol}] 가 가동 OFF 감지. 익절 조건주문({cond_order_id}) 파기 완료.", flush=True)
                             await notify_tg(f"🛑 <b>[aVWAP {symbol}] 수동 오버나이트(가동 OFF) 전환</b>\n▫️ 조치: 기장전된 익절 조건주문 안전 파기 완료")
                             cond_order_id = ""
                             target_sell_price = 0.0
@@ -630,7 +568,7 @@ async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: s
                                 await AssassinLedger.save_state(symbol, cond_order_id="", target_sell_price=0.0)
                                 cond_order_id = ""
                                 target_sell_price = 0.0
-                                await notify_tg(f"🛑 <b>[aVWAP {symbol}] 수동 오버나이트(가동 OFF) 전환</b>\n▫️ 조치: 로컬 덫 장부 초기화 완료 (서버단 이미 증발)")
+                                await notify_tg(f"🛑 <b>[aVWAP {symbol}] 수동 오버나이트(가동 OFF) 전환</b>\n▫ 조치: 로컬 덫 장부 초기화 완료 (서버단 이미 증발)")
                             print(f"🚨 [수동 OFF 덫 파기 방어 {symbol}] {e}", flush=True)
                         finally:
                             in_memory_ordering_lock[symbol] = False
@@ -655,7 +593,8 @@ async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: s
             if holdings_qty > 0 and not has_open_sell and not has_open_buy and not cond_order_id and not in_memory_ordering_lock[symbol] and is_active:
                 calculated_target = target_sell_price
                 trap_qty = holdings_qty
-                avg_price = last_buy_price
+                
+                avg_price = float(holdings_detail.get('avg_price', 0.0))
                 is_rearm = True
                 trap_tag = "" 
                 
@@ -669,9 +608,10 @@ async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: s
                                 filled_qty = int(math.floor(float(order_detail.get("execution", {}).get("filledQuantity", 0.0))))
                                 exec_price = float(order_detail.get("execution", {}).get("averageFilledPrice", 0.0))
                                 
-                                if filled_qty > 0 and exec_price > 0.0:
+                                if filled_qty > 0:
                                     trap_qty = min(holdings_qty, filled_qty)
-                                    avg_price = exec_price
+                                    if avg_price <= 0.0 and exec_price > 0.0:
+                                        avg_price = exec_price
                                     is_rearm = False
                         except Exception:
                             pass
@@ -679,7 +619,7 @@ async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: s
                         is_rearm = False
 
                     if avg_price <= 0.0:
-                        avg_price = float(holdings_detail.get('avg_price', 0.0))
+                        avg_price = last_buy_price
 
                     if avg_price > 0.0:
                         calculated_target = math.ceil(avg_price * 1.01 * 100) / 100.0
@@ -711,7 +651,7 @@ async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: s
                                 is_session_done = True
                             else:
                                 await AssassinLedger.save_state(symbol, price=avg_price, target_sell_price=calculated_target, cond_order_id=new_cond_id)
-                            await notify_tg(f"🟢 <b>[aVWAP {symbol}] {trap_tag} 기계적 조건주문 덫 장전</b>\n▫️ 팩트 평단가: ${avg_price:.2f}\n▫️ 익절 덫: ${calculated_target:.2f}\n▫️ 수량: {trap_qty}주")
+                            await notify_tg(f"🟢 <b>[aVWAP {symbol}] {trap_tag} 기계적 조건주문 덫 장전</b>\n▫️️ 팩트 평단가: ${avg_price:.2f}\n▫️ 익절 덫: ${calculated_target:.2f}\n▫️ 수량: {trap_qty}주")
                         else:
                             await AssassinLedger.save_state(symbol, cond_order_id=new_cond_id)
                             await notify_tg(f"🟢 <b>[aVWAP {symbol}] 포지션 조건주문 덫 재장전</b>\n▫️ 유지 평단가: ${avg_price:.2f}\n▫️ 익절 덫: ${calculated_target:.2f}\n▫️ 수량: {trap_qty}주")
@@ -779,7 +719,16 @@ async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: s
                                 ask_1_price = current_price
                                 
                             if ask_1_price > 0.0:
-                                target_qty = int(math.floor(budget / ask_1_price))
+                                # NEW: 매수 요격 전 USD Buying Power 원자적 프로빙 및 예산 동적 안전화(0.5% 버퍼) 락온 결속
+                                try:
+                                    current_bp = await client.get_usd_buying_power()
+                                    safe_bp = current_bp * 0.995
+                                    actual_budget = min(budget, safe_bp)
+                                except Exception as e:
+                                    print(f"🚨 [Buying Power 검증 방어] {e}", flush=True)
+                                    actual_budget = budget
+
+                                target_qty = int(math.floor(actual_budget / ask_1_price))
                                 
                                 if target_qty > 0:
                                     client_id = idempotency_keys[symbol]["BUY"]
@@ -800,8 +749,50 @@ async def assassin_loop(client: TossApiClient, bot: Bot, chat_id: int, symbol: s
                                     
                                     idempotency_keys[symbol]["BUY"] = None
                                     
+                                    nq_c, nq_h, nq_l = 0.0, 0.0, 0.0
+                                    nq_amp, nq_current_amp = 0.0, 0.0
+                                    
+                                    def _get_nq_for_alert():
+                                        tkr = yf.Ticker("NQ=F")
+                                        df = tkr.history(period="5d", interval="1m")
+                                        if df.empty: return 0.0, 0.0, 0.0
+                                        
+                                        df.index = pd.to_datetime(df.index, utc=True).tz_convert(ZoneInfo('America/New_York'))
+                                        time_diffs = df.index.to_series().diff()
+                                        gaps = time_diffs[time_diffs > pd.Timedelta(minutes=45)]
+                                        
+                                        if not gaps.empty:
+                                            last_gap_time = gaps.index[-1]
+                                            df = df[df.index >= last_gap_time]
+                                            
+                                        return float(df['Close'].iloc[-1]), float(df['High'].max()), float(df['Low'].min())
+                                        
+                                    try:
+                                        nq_c, nq_h, nq_l = await asyncio.wait_for(asyncio.to_thread(_get_nq_for_alert), timeout=5.0)
+                                        if nq_l > 0.0:
+                                            nq_amp = ((nq_h - nq_l) / nq_l * 100.0)
+                                            nq_current_amp = ((nq_c - nq_l) / nq_l * 100.0)
+                                    except Exception as e:
+                                        print(f"🚨 [NQ=F 타전 융합 방어] {e}", flush=True)
+                                        
+                                    nq_alert_str = ""
+                                    if nq_c > 0.0 and nq_l > 0.0:
+                                        nq_alert_str = (
+                                            f"\n➖➖➖➖➖➖➖➖➖➖➖➖➖➖\n"
+                                            f"🌐 <b>나스닥 100 선물 (NQ=F)</b>\n"
+                                            f"▫️ 현재: <code>{nq_c:.2f}</code> | 고가: <code>{nq_h:.2f}</code> | 저가: <code>{nq_l:.2f}</code>\n"
+                                            f"▫️ 총 진폭: <code>{nq_amp:.2f}%</code> | 저점 대비 반등: <code>{nq_current_amp:.2f}%</code>"
+                                        )
+                                    
                                     lock_msg = f"VWAP 연속 돌파 방어망 통과 ({required_ticks}틱)"
-                                    await notify_tg(f"🚀 <b>[aVWAP {symbol}] 단독 돌파 요격 매수 (세션: {hardcoded_session})</b>\n▫️ aVWAP: ${vwap_price:.2f}\n▫️ 타격가: ${ask_1_price:.2f}\n▫️ 수량: {target_qty}주\n▫️ 확증: {lock_msg}")
+                                    await notify_tg(
+                                        f"🚀 <b>[aVWAP {symbol}] 단독 돌파 요격 매수 (세션: {hardcoded_session})</b>\n"
+                                        f"▫️ aVWAP: ${vwap_price:.2f}\n"
+                                        f"▫️ 타격가: ${ask_1_price:.2f}\n"
+                                        f"▫️ 수량: {target_qty}주\n"
+                                        f"▫️ 확증: {lock_msg}"
+                                        f"{nq_alert_str}"
+                                    )
                         except Exception as e:
                             print(f"🚨 [BUY 방어] {e}", flush=True)
                             await notify_tg(f"🚨 <b>[BUY 에러 {symbol}]</b> {html.escape(str(e))}")
@@ -829,7 +820,6 @@ async def main():
     dp.include_router(router)
     
     asyncio.create_task(api_client.token_renewal_loop())
-    asyncio.create_task(macro_risk_monitor(bot, ADMIN_CHAT_ID))
     asyncio.create_task(auto_update_loop(bot, ADMIN_CHAT_ID))
     asyncio.create_task(assassin_loop(api_client, bot, ADMIN_CHAT_ID, "SOXL"))
     asyncio.create_task(assassin_loop(api_client, bot, ADMIN_CHAT_ID, "SOXS"))

@@ -21,10 +21,11 @@
 # MODIFIED: 초과 Case 60 - 통합 지시서 전일 종가(prev_close) 동적 캘린더 추출 방어망 주입
 # MODIFIED: 초과 Case 61 - 데이장(19:00 EST 이후) 1d 캔들 롤오버 시 실시간 미완성 캔들 오염(어제 진폭 휩소) 완벽 방어를 위한 3단 동적 시프트 락온
 # MODIFIED: Case 13 - 04:06 EST 절대 타임쉴드 구간 '절대쉴드' UI 렌더링 락온 결속
-# NEW: 초과 Case 58 - 관제탑 UI MACRO_BLOCKED 감지 시 '🛑 강제퇴근' 원자적 렌더링 결속
+# REMOVED: 매크로 위험 감지망 전면 소각에 따른 MACRO_BLOCKED 분기 렌더링 영구 소각
 # NEW: 나스닥 100 선물지수(NQ=F) 실시간 관제 UI 렌더링 및 비동기 수집망 결속
 # MODIFIED: 관제탑 UI NQ=F 실시간 진폭(Amplitude) 연산 및 렌더링 결속
 # NEW: 관제탑 UI NQ=F 저가 대비 현재가 실시간 반등 진폭(nq_current_amp) 연산 및 2줄 분리 렌더링 결속
+# MODIFIED: NQ=F yfinance 데이터 period="1d" 자정 증발 한계 극복을 위한 5d 스코프 확장 및 45분 갭 기반 논리 세션 시프트 락온
 
 import os
 import html
@@ -170,9 +171,20 @@ async def build_avwap_radar() -> tuple[str, InlineKeyboardMarkup]:
     async def fetch_nq_futures():
         def _get_nq():
             tkr = yf.Ticker("NQ=F")
-            df = tkr.history(period="1d", interval="1m")
+            # MODIFIED: NQ=F 1d 자정 증발 왜곡 방어 및 45분 갭 기반 논리 세션 시프트 락온
+            df = tkr.history(period="5d", interval="1m")
             if df.empty: return 0.0, 0.0, 0.0
+            
+            df.index = pd.to_datetime(df.index, utc=True).tz_convert(ZoneInfo('America/New_York'))
+            time_diffs = df.index.to_series().diff()
+            gaps = time_diffs[time_diffs > pd.Timedelta(minutes=45)]
+            
+            if not gaps.empty:
+                last_gap_time = gaps.index[-1]
+                df = df[df.index >= last_gap_time]
+                
             return float(df['Close'].iloc[-1]), float(df['High'].max()), float(df['Low'].min())
+            
         try:
             return await asyncio.wait_for(asyncio.to_thread(_get_nq), timeout=5.0)
         except Exception:
@@ -313,10 +325,7 @@ async def build_avwap_radar() -> tuple[str, InlineKeyboardMarkup]:
         elif qty > 0:
             state_text = "보유(+1.0%)"
         elif is_done:
-            if entry_session == "MACRO_BLOCKED":
-                state_text = "🛑 강제퇴근"
-            else:
-                state_text = "타격완료"
+            state_text = "타격완료"
         else:
             if current_session == "preMarket":
                 import time
